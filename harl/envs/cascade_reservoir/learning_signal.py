@@ -84,7 +84,9 @@ def learning_signal_report(runner, before, post_prediction):
             raise ValueError('Learning-signal actor and critic episode boundaries must match')
         if not np.isfinite(buffer.active_masks).all():
             raise FloatingPointError('Non-finite learning-signal actor masks')
-        weights = buffer.discount_weights(cb.gamma)
+        # Actor rows have uniform temporal weight. Gamma remains part of
+        # return/GAE targets, not an extra multiplier on policy or entropy rows.
+        weights = np.ones_like(buffer.active_masks[:-1], dtype=np.float32)
         if actor.use_policy_active_masks:
             weights = weights*buffer.active_masks[:-1]
         objective = weights > 0.
@@ -139,6 +141,8 @@ def learning_signal_report(runner, before, post_prediction):
     use_gae = bool(getattr(cb, 'use_gae', runner.algo_args['algo'].get('use_gae', True)))
     return dict(scope='training_rollout', gamma=float(cb.gamma), gae_lambda=float(cb.gae_lambda),
         use_gae=use_gae, target_estimator='gae' if use_gae else 'discounted_return',
+        actor_temporal_weighting='uniform_rollout_rows',
+        actor_objective_reduction='mean over all rollout rows; configured active masks zero excluded rows',
         interpretation='realized Monte Carlo targets and rowwise spread on the collected training trajectories; '
                        'not true advantages, independent daily samples, or held-out critic accuracy',
         batch=dict(episode_trajectories=len(windows), episode_horizon_days=int(shape[0]),

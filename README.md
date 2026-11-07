@@ -18,7 +18,7 @@ sequential-update implementation are retained.
 cd /Users/hujingxin/Documents/Code_python/HARL-main
 
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade_compare.py \
-  --episodes 300 --seeds 1 2 3 --gamma 1 --eval-interval 1 --diagnostics \
+  --episodes 300 --seeds 1 2 3 --gamma 0.995 --eval-interval 1 --diagnostics \
   --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
 ```
 
@@ -85,7 +85,7 @@ The physical model, observations supplied by the environment, rewards and servic
 thresholds have not changed. Both algorithms use the existing hidden widths `[64, 128, 256, 256]`,
 ReLU/LayerNorm layers, 100-command categorical distributions, a centralized
 six-output critic, ValueNorm, individual 50/50 local/global rewards, GAE, forced
-action masks, and episode-start weights. The shared YAML remains
+action masks, and uniform Actor row weighting. The shared YAML remains
 `harl/configs/algos_cfgs/happo_cascade.yaml`. Its `share_param: false` continues to
 describe HAPPO; the MAPPO runner and comparison launcher explicitly enable sharing
 only for MAPPO and record the effective setting. Random seeds and hydrological
@@ -93,7 +93,7 @@ window schedules remain paired; actor parameter tensors and their initialization
 are no longer expected to match across these different architectures.
 
 MAPPO pools the five reservoirs' samples, preserving each row's own mixed-return
-advantage, old action likelihood, identity, controllability and calendar weight.
+advantage, old action likelihood, identity and controllability.
 It performs one optimizer step per joint minibatch, rather than training the same
 network five times through the individual agent loop. With the default single
 minibatch and five epochs, this is five shared-actor steps per update, over
@@ -109,8 +109,9 @@ reporting; it does not stop epochs or reject optimizer steps.
 This is a task-adapted, parameter-sharing MAPPO comparison. HARL's generic
 EP default uses a common scalar reward/value; this task retains its existing
 individual mixed rewards and six value outputs for both algorithms. It also
-retains this repository's full-row loss averaging and calendar discount weights,
-rather than introducing the reference's active-count normalization. Therefore,
+retains this repository's full-row loss averaging, rather than introducing the
+reference's active-count normalization. Actor policy and entropy losses have no
+additional episode-age discount multiplier. Therefore,
 the comparison now includes both the update-rule difference and policy parameter
 sharing under the existing reservoir formulation. It does not isolate the
 sequential-correction effect alone or reproduce every generic HARL default.
@@ -138,7 +139,7 @@ optimizer count, raw input dimension and identity-augmented input dimension.
 - The final trained policy is evaluated after all training seeds finish.
 - Training uses a reproducible schedule that targets balanced year-day coverage, with distinct windows within each parallel batch.
 - Service-threshold multipliers are configured in the environment YAML or CLI and recorded in each run's metadata.
-- Learning gives all 1,825 days equal weight (`gamma=1`) and adds a soft cost for each guaranteed-output violation; physical requirements and violation counting are unchanged.
+- Actor losses use uniform temporal weighting, with forced decisions masked. GAE, critic returns and return accounting use `gamma=0.995`; physical energy and violation counts remain undiscounted. A soft cost applies to each guaranteed-output violation.
 
 The standard budget is 300 completed episodes per seed: 50 HAPPO updates and
 547,500 daily environment transitions. Each update collects six complete
@@ -151,7 +152,7 @@ Episode counts must be divisible by the number of workers.
 cd /Users/hujingxin/Documents/Code_python/HARL-main
 
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
-  --episodes 300 --seeds 1 2 3 --gamma 1 --eval-interval 1 --diagnostics \
+  --episodes 300 --seeds 1 2 3 --gamma 0.995 --eval-interval 1 --diagnostics \
   --episode-log runs/five_year_periodic_eval_seeds123_run2.jsonl \
   --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
 ```
@@ -246,7 +247,7 @@ evaluation sequence without training:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
-  --gamma 1 --check-data-only
+  --gamma 0.995 --check-data-only
 ```
 
 `--skip-final-evaluation` reserves held-out data during tuning.
@@ -277,7 +278,7 @@ reward settings. CLI arguments override their corresponding YAML values.
 | Actor / critic learning rate | 0.0003 / 0.0003 |
 | Actor / critic optimization epochs | 5 / 5 |
 | Actor / critic minibatches per epoch | 1 / 1 |
-| Gamma / GAE lambda | 1.0 / 0.95 |
+| Gamma / GAE lambda | 0.995 / 0.95 |
 | Local guaranteed-output violation cost | 1.0 per actual violating reservoir-day, before 50/50 reward mixing |
 | PPO clip / entropy coefficient | 0.2 / 0.001 |
 | Maximum gradient norm | 0.5 |
@@ -287,9 +288,11 @@ reward settings. CLI arguments override their corresponding YAML values.
 | Training-window sampling | `coverage_balanced`; `uniform` restores the previous sampler |
 | Guaranteed-output / ecological-flow threshold scale | Environment YAML values; CLI overrides are available |
 
-Both the default configuration and launch command select gamma=1 so later-year
-service failures are not downweighted relative to the first year. The local
-learning reward includes `guaranteed_output_violation_weight` times the existing
+Both the default configuration and launch commands select gamma=0.995 for
+GAE, critic returns and return accounting. Actor policy and entropy losses use
+uniform rollout rows with policy active masks; no extra gamma**t factor is
+applied to either loss. The full-row averaging denominator remains unchanged.
+The local learning reward includes `guaranteed_output_violation_weight` times the existing
 tolerance-filtered violation indicator. This supplements relative deficit cost:
 the latter measures severity, whereas the new term targets frequency. Setting
 that weight to 0 restores the previous local reward formula. Constraints remain
@@ -457,12 +460,12 @@ allows duplicate windows within a batch. Both modes leave the fixed periodic
 evaluation windows and final held-out evaluation unchanged. There is no new
 wet/normal/dry classification or hydrological-class stratification.
 
-To compare the new sampler with the most recent G40/E60 experiment, keep its
-other settings fixed:
+For a G40/E60 sampler experiment using the current Actor formulation and
+discount, use:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
-  --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
+  --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 0.995 --eval-interval 1 \
   --window-sampling coverage_balanced \
   --guaranteed-output-scale 0.4 --ecological-flow-scale 0.6 --diagnostics \
   --episode-log runs/five_year_bins200_g40_e60_coverage_balanced_seeds123_run1.jsonl \
@@ -507,7 +510,7 @@ For a separate 50% / 70% sensitivity experiment, use the following explicit over
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
-  --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
+  --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 0.995 --eval-interval 1 \
   --guaranteed-output-scale 0.5 --ecological-flow-scale 0.7 --diagnostics \
   --episode-log runs/five_year_bins200_g50_e70_mean_sd_seeds123_run1.jsonl \
   --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
@@ -542,7 +545,7 @@ creating CSVs, checkpoints, JSONL or extra figures. For the current comparison:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade_compare.py \
-  --algorithms happo mappo --episodes 300 --seeds 1 2 3 --gamma 1 \
+  --algorithms happo mappo --episodes 300 --seeds 1 2 3 --gamma 0.995 \
   --eval-interval 1 --diagnostics --xld-diagnostics \
   --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
 ```
@@ -576,7 +579,7 @@ separate 200-command, 40% requirement sensitivity example is:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
   --episodes 300 --episode-days 1825 --parallel-envs 6 \
-  --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
+  --action-bins 200 --seeds 1 2 3 --gamma 0.995 --eval-interval 1 \
   --window-sampling coverage_balanced \
   --guaranteed-output-scale 0.4 --ecological-flow-scale 0.4 \
   --diagnostics --xld-diagnostics \
@@ -710,7 +713,8 @@ action probability, entropy, objective weight and the exact HAPPO factor at
 that actor's sequential update entry. Values are frozen before optimization
 and before ValueNorm moments change. Forced commands retain their sampled
 probability separately from the effective action/log-probability placeholders;
-their policy-objective weight is zero.
+their policy-objective weight is zero. The compatibility column
+`episode_time_weight` is always 1.0; it is not an episode-age discount.
 Global, system and legacy-team reward fields repeat across the five reservoir
 rows for the same day/lane. Count each of those scalars once per day/lane when
 reconstructing system accounting; do not sum their repeated CSV cells.
@@ -728,7 +732,7 @@ per seed. Begin with a short diagnostic run, for example two updates:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
   --episodes 12 --episode-days 1825 --parallel-envs 6 \
-  --action-bins 200 --seeds 1 --gamma 1 --eval-interval 1 \
+  --action-bins 200 --seeds 1 --gamma 0.995 --eval-interval 1 \
   --window-sampling coverage_balanced \
   --trajectory-diagnostics --save-checkpoints --checkpoint-interval 1 \
   --xld-diagnostics --skip-final-evaluation --no-plot \

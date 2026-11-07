@@ -200,6 +200,29 @@ class ComparisonIdentityTest(unittest.TestCase):
         self.assertEqual(normalized['shared_settings']['algo']['entropy_coef'], .001)
         self.assertEqual(settings, original)
 
+    def test_temporal_weighting_provenance_is_preserved_and_must_match(self):
+        data = payload()
+        for entry in data['runs']:
+            entry['payload']['comparison_context']['shared_settings']['actor_temporal_weighting'] = 'uniform_rollout_rows'
+        compare.validate_comparison(data)
+        data['runs'][0]['payload']['comparison_context']['shared_settings'].pop('actor_temporal_weighting')
+        with self.assertRaisesRegex(ValueError, 'settings'):
+            compare.validate_comparison(data)
+
+        settings = context()['shared_settings']
+        metadata = dict(episode_horizon_days=2, parallel_environments=1,
+            episodes_per_seed=2, training_years=settings['training_years'],
+            evaluation_source_years=settings['evaluation_source_years'],
+            physical_config=settings['physical_config'], data_hashes={'inflow.csv': 'a'*64},
+            periodic_evaluation={'windows': descriptors()},
+            learning_reward_architecture={'actor_temporal_weighting': 'uniform_rollout_rows'},
+            config=dict({key: copy.deepcopy(settings[key]) for key in ('device', 'train', 'model', 'algo')},
+                        experiment={'seeds': [1, 2], 'window_sampling': 'coverage_balanced'}))
+        extracted = compare.context_from_configuration(metadata)
+        self.assertEqual(extracted['shared_settings']['actor_temporal_weighting'], 'uniform_rollout_rows')
+        metadata.pop('learning_reward_architecture')
+        self.assertNotIn('actor_temporal_weighting', compare.context_from_configuration(metadata)['shared_settings'])
+
     def test_unlabeled_legacy_log_cannot_be_claimed_as_mappo(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'legacy.jsonl'

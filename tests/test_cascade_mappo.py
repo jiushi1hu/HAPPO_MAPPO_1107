@@ -4,6 +4,7 @@ import csv
 from contextlib import redirect_stdout
 import io
 from pathlib import Path
+import random
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from harl.algorithms.actors.shared_mappo import (
     SharedMAPPOAgent, augment_agent_observations, joint_shared_actor_batch,
     make_shared_mappo_agents)
 from harl.common.buffers.on_policy_actor_buffer import OnPolicyActorBuffer
+from harl.common.buffers.on_policy_critic_buffer_ep import OnPolicyCriticBufferEP
 from harl.envs.cascade_reservoir.data_loader import CascadeData
 from harl.envs.cascade_reservoir.evaluation import evaluate_policy
 from harl.envs.cascade_reservoir.periodic_evaluation import select_periodic_windows
@@ -41,7 +43,7 @@ class MAPPOObjectiveTest(unittest.TestCase):
             lr=.003, opti_eps=1e-5, weight_decay=0., clip_param=.2, ppo_epoch=2,
             actor_num_mini_batch=1, entropy_coef=.01, use_max_grad_norm=True,
             max_grad_norm=.5, use_policy_active_masks=True, action_aggregation='prod',
-            normalize_shared_advantages=True, gamma=.5, share_param=False)
+            normalize_shared_advantages=True, gamma=.995, share_param=False)
         self.obs_space = Box(-np.inf, np.inf, (2,), dtype=np.float32)
         self.act_space = Discrete(3)
 
@@ -58,7 +60,7 @@ class MAPPOObjectiveTest(unittest.TestCase):
         old_logp = logp.numpy() + np.array([[.3], [-.3], [.2], [-.2]], dtype=np.float32)
         advantages = np.array([[-1.], [.2], [1.], [-.5]], dtype=np.float32)
         return (obs, actions, active.copy(), active, old_logp, advantages, None,
-                np.ones_like(active), np.ones_like(active))
+                np.ones_like(active))
 
     def buffer(self, actor):
         sample = self.sample(actor)
@@ -76,6 +78,8 @@ class MAPPOObjectiveTest(unittest.TestCase):
     def assert_state_equal(self, left, right):
         if isinstance(left, torch.Tensor):
             self.assertTrue(torch.equal(left, right))
+        elif isinstance(left, np.ndarray):
+            np.testing.assert_array_equal(left, right)
         elif isinstance(left, dict):
             self.assertEqual(set(left), set(right))
             for key in left:
@@ -84,6 +88,20 @@ class MAPPOObjectiveTest(unittest.TestCase):
             self.assertEqual(len(left), len(right))
             for x, y in zip(left, right):
                 self.assert_state_equal(x, y)
+        else:
+            self.assertEqual(left, right)
+
+    def assert_state_close(self, left, right):
+        if isinstance(left, torch.Tensor):
+            torch.testing.assert_close(left, right, rtol=1e-5, atol=1e-7)
+        elif isinstance(left, dict):
+            self.assertEqual(set(left), set(right))
+            for key in left:
+                self.assert_state_close(left[key], right[key])
+        elif isinstance(left, (list, tuple)):
+            self.assertEqual(len(left), len(right))
+            for x, y in zip(left, right):
+                self.assert_state_close(x, y)
         else:
             self.assertEqual(left, right)
 
@@ -103,7 +121,7 @@ class MAPPOObjectiveTest(unittest.TestCase):
                 old_logp = before_logp.numpy()-np.float32(np.log(ratio))
                 sample = (obs, action, active.copy(), active, old_logp,
                           np.array([[advantage]], dtype=np.float32), None,
-                          active.copy(), active.copy())
+                          active.copy())
                 actor.update(sample)
                 with torch.no_grad():
                     after_logp, _, _ = actor.evaluate_actions(obs, action)
@@ -116,7 +134,6 @@ class MAPPOObjectiveTest(unittest.TestCase):
         actor, happo = self.actor(), self.actor(HAPPO)
         self.assert_state_equal(actor.actor.state_dict(), happo.actor.state_dict())
         sample = self.sample(actor)
-        sample[-1][:] = np.array([[1.], [.5], [.25], [.125]], dtype=np.float32)
         left, right = actor.update(sample), happo.update(sample)
         for a, b in zip(left, right):
             torch.testing.assert_close(a, b, rtol=0., atol=0.)
@@ -135,14 +152,14 @@ class MAPPOObjectiveTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unit buffer factors'):
             actor.train(buffer, advantages, 'EP', diagnostics=True)
 
-    def test_zero_control_or_zero_time_mass_does_not_advance_adam(self):
-        actor = self.actor()
-        actor.update(self.sample(actor))  # Populate Adam momentum first.
-        model = copy.deepcopy(actor.actor.state_dict())
-        optimizer = copy.deepcopy(actor.actor_optimizer.state_dict())
-        for field in (3, 8):
+    def test_zero_control_does_not_advance_adam(self):
+        for cls in (HAPPO, MAPPO):
+            actor = self.actor(cls)
+            actor.update(self.sample(actor))  # Populate Adam momentum first.
+            model = copy.deepcopy(actor.actor.state_dict())
+            optimizer = copy.deepcopy(actor.actor_optimizer.state_dict())
             sample = list(self.sample(actor))
-            sample[field] = np.zeros_like(sample[field])
+            sample[3] = np.zeros_like(sample[3])
             with mock.patch.object(actor, 'evaluate_actions',
                                    side_effect=AssertionError('zero-mass batch was evaluated')):
                 result = actor.update(tuple(sample))
@@ -151,13 +168,33 @@ class MAPPOObjectiveTest(unittest.TestCase):
             self.assert_state_equal(model, actor.actor.state_dict())
             self.assert_state_equal(optimizer, actor.actor_optimizer.state_dict())
 
-    def test_calendar_weights_and_diagnostics_preserve_update_and_rng(self):
+    def test_forced_duplicate_keeps_full_row_mean_for_policy_and_entropy(self):
+        for cls in (HAPPO, MAPPO):
+            with self.subTest(algorithm=cls.__name__):
+                single = self.actor(cls, use_max_grad_norm=False)
+                masked = copy.deepcopy(single)
+                sample = tuple(None if value is None else value[:1].copy()
+                               for value in self.sample(single))
+                doubled = [None if value is None else np.repeat(value, 2, axis=0)
+                           for value in sample]
+                doubled[3][1] = 0.
+                # A forced placeholder's values cannot contribute to either
+                # objective, but it remains a row in the minibatch mean.
+                doubled[0][1] = [100., -100.]
+                doubled[1][1] = 2.
+                doubled[4][1] = 0.
+                doubled[5][1] = 10000.
+                one_result = single.update(sample)
+                two_result = masked.update(tuple(doubled))
+                for one, two in zip(one_result[:3], two_result[:3]):
+                    torch.testing.assert_close(two, .5*one, rtol=1e-6, atol=1e-7)
+
+    def test_active_masks_and_diagnostics_preserve_update_and_rng(self):
         plain = self.actor()
         measured = copy.deepcopy(plain)
         buffer, advantages = self.buffer(plain)
-        buffer.masks[2] = 0.  # An internal terminal resets the discount clock.
+        buffer.masks[2] = 0.  # Episode boundaries do not reweight actor rows.
         buffer.active_masks[1] = 0.
-        np.testing.assert_array_equal(buffer.discount_weights(.5).ravel(), [1., .5, 1., .5])
         measured_buffer = copy.deepcopy(buffer)
         torch.manual_seed(72)
         plain_info = plain.train(buffer, advantages.copy(), 'EP')
@@ -174,6 +211,90 @@ class MAPPOObjectiveTest(unittest.TestCase):
         for suffix in ('before', 'after'):
             self.assertAlmostEqual(info['regularized_objective_'+suffix],
                 info['clipped_surrogate_'+suffix]+measured.entropy_coef*info['weighted_entropy_'+suffix])
+
+    def test_fixed_advantages_give_gamma_invariant_updates_without_row_age_preference(self):
+        # Gamma belongs to target construction. Moving an unchanged decision
+        # to a later rollout row must not reduce its PPO or entropy influence.
+        identity = np.arange(4)
+        moved = np.array([3, 0, 2, 1])
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        for cls in (HAPPO, MAPPO):
+            initial = self.actor(cls, gamma=0.)
+            original, advantages = self.buffer(initial)
+            original.action_log_probs[:, 0] = self.sample(initial)[4]
+            original.active_masks[1] = 0.
+            original.actions[1] = 0.
+            original.action_log_probs[1] = 0.
+            original.masks[2] = 0.
+            if cls is HAPPO:
+                original.update_factor(np.array([.6, 1.2, 1.7, .9],
+                                                dtype=np.float32).reshape(4, 1, 1))
+            reference = None
+            for gamma in (0., .995, 1.):
+                for order in (identity, moved):
+                    with self.subTest(algorithm=cls.__name__, gamma=gamma,
+                                      row_order=order.tolist()):
+                        actor = self.actor(cls, gamma=gamma)
+                        buffer = copy.deepcopy(original)
+                        for name in ('obs', 'masks', 'active_masks', 'available_actions'):
+                            values = getattr(buffer, name)
+                            values[:-1] = values[:-1][order].copy()
+                        for name in ('actions', 'action_log_probs', 'factor'):
+                            values = getattr(buffer, name)
+                            values[:] = values[order].copy()
+                        fixed_advantages = advantages[order].copy()
+                        torch.manual_seed(72)
+                        info = actor.train(buffer, fixed_advantages, 'EP', diagnostics=True)
+                        observed = (copy.deepcopy(actor.actor.state_dict()),
+                                    copy.deepcopy(actor.actor_optimizer.state_dict()),
+                                    torch.get_rng_state().clone(), info)
+                        if reference is None:
+                            reference = observed
+                        elif np.array_equal(order, identity):
+                            self.assert_state_equal(observed[:3], reference[:3])
+                            self.assertEqual(info, reference[3])
+                        else:
+                            # Permuting a reduction can change its final float32
+                            # rounding; the update and Adam moments must agree.
+                            self.assert_state_close(observed[:2], reference[:2])
+                            self.assert_state_equal(observed[2], reference[2])
+                            self.assertEqual(set(info), set(reference[3]))
+                            for name in info:
+                                # Reordering four float32 rows can change the
+                                # reduction by a few rounding units. Gamma
+                                # comparisons above remain exactly equal.
+                                np.testing.assert_allclose(float(info[name]), float(reference[3][name]),
+                                                           rtol=1e-5, atol=4*np.finfo(np.float32).eps)
+                        self.assertEqual(info['optimizer_steps'], 2.)
+                        self.assertEqual(info['ratio_samples'], 6.)
+                        self.assertEqual(info['ppo_epochs_completed'], 2.)
+                        self.assertGreater(info['weighted_entropy_before'], 0.)
+        self.assert_state_equal(random.getstate(), python_state)
+        self.assert_state_equal(np.random.get_state(), numpy_state)
+
+
+class CascadeDiscountedReturnsTest(unittest.TestCase):
+    def test_gamma_changes_six_channel_returns_and_gae_but_terminal_ignores_bootstrap(self):
+        scales = np.arange(1, 7, dtype=np.float32)
+        # Rewards are (2, 4)*scale and frozen values are (1, 3)*scale.
+        # Lambda=.5 gives first-step GAE targets 2, 5.4825, 5.5 at the
+        # three discounts; ordinary returns are 2, 5.98, 6 respectively.
+        cases = ((0., 2., 2.), (.995, 5.4825, 5.98), (1., 5.5, 6.))
+        for use_gae in (False, True):
+            for gamma, gae_first, return_first in cases:
+                with self.subTest(use_gae=use_gae, gamma=gamma):
+                    buffer = OnPolicyCriticBufferEP(dict(episode_length=2,
+                        n_rollout_threads=1, gamma=gamma, gae_lambda=.5,
+                        use_gae=use_gae, use_proper_time_limits=True, critic_output_dim=6),
+                        Box(-np.inf, np.inf, (2,), dtype=np.float32))
+                    buffer.rewards[:, 0] = np.array([[2.], [4.]])*scales
+                    buffer.value_preds[:-1, 0] = np.array([[1.], [3.]])*scales
+                    buffer.masks[-1] = 0.
+                    buffer.compute_returns(np.full((1, 6), 1e6, dtype=np.float32))
+                    expected_first = gae_first if use_gae else return_first
+                    np.testing.assert_allclose(buffer.returns[0, 0], expected_first*scales,
+                                               rtol=1e-6, atol=1e-6)
+                    np.testing.assert_array_equal(buffer.returns[1, 0], 4.*scales)
 
 class MAPPORunnerDispatchTest(unittest.TestCase):
     def test_own_return_channels_without_prepost_likelihood_evaluation(self):
@@ -229,6 +350,7 @@ class SharedMAPPOObjectiveTest(unittest.TestCase):
     sample = MAPPOObjectiveTest.sample
     buffer = MAPPOObjectiveTest.buffer
     assert_state_equal = MAPPOObjectiveTest.assert_state_equal
+    assert_state_close = MAPPOObjectiveTest.assert_state_close
 
     def views(self, **changes):
         torch.manual_seed(21)
@@ -301,7 +423,7 @@ class SharedMAPPOObjectiveTest(unittest.TestCase):
         torch.testing.assert_close(left[0], right[0], rtol=0., atol=0.)
         torch.testing.assert_close(left[1], right[1], rtol=0., atol=0.)
 
-    def test_joint_rows_preserve_own_targets_masks_clocks_and_source_buffers(self):
+    def test_joint_rows_preserve_own_targets_masks_and_source_buffers(self):
         views = self.views()
         buffers, advantages = self.rollouts(views)
         for i, buffer in enumerate(buffers):
@@ -318,7 +440,7 @@ class SharedMAPPOObjectiveTest(unittest.TestCase):
             np.testing.assert_array_equal(joined[:, i], advantages[i][:, 0])
             np.testing.assert_array_equal(joint.action_log_probs[:, i], buffer.action_log_probs[:, 0])
             np.testing.assert_array_equal(joint.active_masks[:, i], buffer.active_masks[:, 0])
-            np.testing.assert_array_equal(joint.discount_weights(.5)[:, i], buffer.discount_weights(.5)[:, 0])
+            np.testing.assert_array_equal(joint.masks[:, i], buffer.masks[:, 0])
             for name in ('obs', 'actions', 'action_log_probs', 'masks', 'active_masks', 'factor'):
                 np.testing.assert_array_equal(getattr(buffer, name), snapshots[i][name])
         with self.assertRaisesRegex(ValueError, 'own advantage'):
@@ -331,8 +453,8 @@ class SharedMAPPOObjectiveTest(unittest.TestCase):
         joint, joined = joint_shared_actor_batch(core, buffers, advantages, 5)
         expected = copy.deepcopy(core)
         torch.manual_seed(72)
-        sample = next(joint.feed_forward_generator_actor(joined, 1,
-            objective_weights=joint.discount_weights(self.args['gamma'])))
+        sample = next(joint.feed_forward_generator_actor(joined, 1))
+        self.assertEqual(len(sample), 8)
         expected.update(sample)
         torch.manual_seed(72)
         with mock.patch.object(core, 'update', wraps=core.update) as update:
@@ -393,8 +515,49 @@ class SharedMAPPOObjectiveTest(unittest.TestCase):
                 logp, _, _ = view.evaluate_actions(obs, actions)
             chosen_actions = torch.as_tensor(actions, dtype=torch.int64).squeeze(-1)
             torch.testing.assert_close(distribution.log_prob(chosen_actions), logp.squeeze(-1))
-            metrics = view.surrogate_metrics(buffer, advantage, buffer.discount_weights(.5))
+            metrics = view.surrogate_metrics(buffer, advantage)
             self.assertTrue(all(np.isfinite(value) for value in metrics.values()))
+
+    def test_shared_fixed_channels_are_gamma_invariant_after_row_age_permutation(self):
+        original_views = self.views(gamma=0.)
+        original_buffers, original_advantages = self.rollouts(original_views)
+        for i, buffer in enumerate(original_buffers):
+            buffer.active_masks[i % 4] = 0.
+            buffer.actions[i % 4] = 0.
+            buffer.action_log_probs[i % 4] = 0.
+        reference = None
+        for gamma in (0., .995, 1.):
+            for order in (np.arange(4), np.array([3, 0, 2, 1])):
+                with self.subTest(gamma=gamma, row_order=order.tolist()):
+                    core = self.views(gamma=gamma)[0].core
+                    buffers = copy.deepcopy(original_buffers)
+                    for buffer in buffers:
+                        for name in ('obs', 'masks', 'active_masks', 'available_actions'):
+                            values = getattr(buffer, name)
+                            values[:-1] = values[:-1][order].copy()
+                        for name in ('actions', 'action_log_probs', 'factor'):
+                            values = getattr(buffer, name)
+                            values[:] = values[order].copy()
+                    advantages = [values[order].copy() for values in original_advantages]
+                    torch.manual_seed(72)
+                    info = core.share_param_train(buffers, advantages, 5, 'EP', diagnostics=True)
+                    observed = (copy.deepcopy(core.actor.state_dict()),
+                                copy.deepcopy(core.actor_optimizer.state_dict()),
+                                torch.get_rng_state().clone(), info)
+                    if reference is None:
+                        reference = observed
+                    elif np.array_equal(order, np.arange(4)):
+                        self.assert_state_equal(observed[:3], reference[:3])
+                        self.assertEqual(info, reference[3])
+                    else:
+                        self.assert_state_close(observed[:2], reference[:2])
+                        self.assert_state_equal(observed[2], reference[2])
+                        for name in info:
+                            np.testing.assert_allclose(float(info[name]), float(reference[3][name]),
+                                                       rtol=1e-5, atol=1e-7)
+                    self.assertEqual(info['optimizer_steps'], 2.)
+                    self.assertEqual(info['ratio_samples'], 30.)
+                    self.assertEqual(info['ppo_epochs_completed'], 2.)
 
 
 

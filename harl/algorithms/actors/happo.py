@@ -47,18 +47,17 @@ class HAPPO(OnPolicyBase):
         return torch.distributions.Categorical(logits=distribution.logits.detach().clone())
 
     @torch.no_grad()
-    def surrogate_metrics(self, actor_buffer, advantages, objective_weights):
+    def surrogate_metrics(self, actor_buffer, advantages):
         """Measure the fixed training batch without shuffling or updating it.
 
         Advantages are the exact post-normalization inputs used by train().
-        Rollout likelihoods, time weights and the sequential HAPPO factor stay
-        fixed for the before/after comparison. All objectives are maximized;
-        the clipped surrogate is the negative of the policy loss.
+        Rollout likelihoods and the sequential HAPPO factor stay fixed for
+        the before/after comparison. All objectives are maximized; the clipped
+        surrogate is the negative of the policy loss. The retained diagnostic
+        key weighted_entropy uses active-mask weighting only.
         """
         active = actor_buffer.active_masks[:-1].reshape(-1, 1)
-        weights = np.asarray(objective_weights).reshape(-1, 1)
-        if self.use_policy_active_masks:
-            weights = weights * active
+        weights = active if self.use_policy_active_masks else np.ones_like(active)
         names = ('clipped_surrogate', 'unclipped_surrogate',
                  'weighted_entropy', 'regularized_objective')
         if not np.any(weights > 0.):
@@ -112,24 +111,16 @@ class HAPPO(OnPolicyBase):
             adv_targ,
             available_actions_batch,
             factor_batch,
-            objective_weights_batch,
         ) = sample
 
         old_action_log_probs_batch = check(old_action_log_probs_batch).to(**self.tpdv)
         adv_targ = check(adv_targ).to(**self.tpdv)
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
         factor_batch = check(factor_batch).to(**self.tpdv)
-        objective_weights_batch = check(objective_weights_batch).to(**self.tpdv)
-        if (objective_weights_batch.shape != active_masks_batch.shape or
-                not torch.isfinite(objective_weights_batch).all() or
-                (objective_weights_batch < 0).any()):
-            raise ValueError("Objective weights must be finite nonnegative sample scalars")
-        sample_weights = objective_weights_batch
-        if self.use_policy_active_masks:
-            sample_weights = sample_weights * active_masks_batch
+        sample_weights = (active_masks_batch if self.use_policy_active_masks
+                          else torch.ones_like(active_masks_batch))
 
-        # Forced actions and, for gamma=0, all days after the episode start
-        # have no objective contribution. Adam momentum must not move them.
+        # Skip an entirely masked minibatch so Adam momentum cannot move it.
         if not (sample_weights > 0).any():
             zero = torch.zeros((), **self.tpdv)
             return zero, zero, zero, torch.ones_like(adv_targ)
@@ -155,10 +146,8 @@ class HAPPO(OnPolicyBase):
             * adv_targ
         )
 
-        # Uniformly shuffled calendar rows estimate the episode-start objective
-        # only when each row retains gamma**t. Average over all sampled rows:
-        # dividing by a batch's active/discounted mass would change the time
-        # weighting (and cancels it entirely in a one-row mini-batch).
+        # Keep a full-row mean: masked rows contribute zero. There is no
+        # additional temporal weighting of the PPO or entropy objectives.
         policy_loss = -(sample_weights * torch.sum(
             factor_batch * torch.min(surr1, surr2), dim=-1, keepdim=True
         )).mean()
@@ -217,21 +206,17 @@ class HAPPO(OnPolicyBase):
             std_advantages = np.nanstd(advantages_copy)
             advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
 
-        # Keep this separate from advantages, so normalization cannot remove
-        # the episode-start discount, and separate from HAPPO's likelihood factor.
-        objective_weights = actor_buffer.discount_weights(self.args["gamma"])
-        surrogate_before = (self.surrogate_metrics(actor_buffer, advantages, objective_weights)
+        surrogate_before = (self.surrogate_metrics(actor_buffer, advantages)
                             if diagnostics else None)
         num_updates = 0
         ratio_sum = 0.
         for _ in range(self.ppo_epoch):
             data_generator = actor_buffer.feed_forward_generator_actor(
                 advantages, self.actor_num_mini_batch,
-                objective_weights=objective_weights,
             )
 
             for sample in data_generator:
-                effective = sample[-1] * (sample[3] if self.use_policy_active_masks else 1.)
+                effective = sample[3] if self.use_policy_active_masks else np.ones_like(sample[3])
                 has_objective = bool(np.any(effective > 0.))
                 result = self.update(sample)
                 policy_loss, dist_entropy, actor_grad_norm, imp_weights = result
@@ -261,6 +246,6 @@ class HAPPO(OnPolicyBase):
 
         if diagnostics:
             train_info.update(self.surrogate_changes(surrogate_before,
-                self.surrogate_metrics(actor_buffer, advantages, objective_weights)))
+                self.surrogate_metrics(actor_buffer, advantages)))
 
         return dict(train_info, **budget_info)

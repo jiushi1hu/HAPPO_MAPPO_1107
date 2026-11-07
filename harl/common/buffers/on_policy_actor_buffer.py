@@ -78,30 +78,7 @@ class OnPolicyActorBuffer:
 
         self.step = (self.step + 1) % self.episode_length
 
-    def discount_weights(self, gamma):
-        """Episode-start discount, distinct from discounted reward-to-go in GAE.
-
-        Cascade rollouts start at January 1 and contain one complete year.
-        Boundary masks also reset the clock independently in each environment
-        if a buffer contains more than one episode. Compute in float64 before
-        converting to the network dtype, rather than accumulating float32 error.
-        """
-        if isinstance(gamma, (bool, np.bool_)):
-            raise ValueError("gamma must be finite and between 0 and 1")
-        try:
-            gamma = float(gamma)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("gamma must be finite and between 0 and 1") from exc
-        if not np.isfinite(gamma) or not 0. <= gamma <= 1.:
-            raise ValueError("gamma must be finite and between 0 and 1")
-        weights = np.ones(self.masks[:-1].shape, dtype=np.float64)
-        for t in range(1, self.episode_length):
-            weights[t] = np.where(self.masks[t] > 0., gamma * weights[t - 1], 1.)
-        return weights.astype(np.float32)
-
-    def feed_forward_generator_actor(
-        self, advantages, actor_num_mini_batch, objective_weights,
-    ):
+    def feed_forward_generator_actor(self, advantages, actor_num_mini_batch):
         """Training data generator for actor that uses MLP network."""
 
         # get episode_length, n_rollout_threads, mini_batch_size
@@ -136,13 +113,7 @@ class OnPolicyActorBuffer:
             raise ValueError("HAPPO likelihood factors must be set before generating actor batches")
         factor = self.factor.reshape(-1, self.factor.shape[-1])
         advantages = advantages.reshape(-1, 1)
-        objective_weights = np.asarray(objective_weights, dtype=np.float32)
-        if (objective_weights.shape != self.active_masks[:-1].shape or
-                not np.isfinite(objective_weights).all() or (objective_weights < 0.).any()):
-            raise ValueError("Objective weights must be finite nonnegative rollout scalars")
-        objective_weights = objective_weights.reshape(-1, 1)
 
-        
         for indices in sampler:
             # obs shape: 
             # (episode_length * n_rollout_threads, *obs_shape) --> (mini_batch_size, *obs_shape)
@@ -154,7 +125,6 @@ class OnPolicyActorBuffer:
             old_action_log_probs_batch = action_log_probs[indices]
             adv_targ = advantages[indices]
             factor_batch = factor[indices]
-            # Apply the same permutation to time weights and action likelihoods.
             yield (obs_batch, actions_batch, masks_batch, active_masks_batch,
                    old_action_log_probs_batch, adv_targ, available_actions_batch,
-                   factor_batch, objective_weights[indices])
+                   factor_batch)

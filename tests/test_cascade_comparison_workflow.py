@@ -64,8 +64,21 @@ class ComparisonDispatchTest(unittest.TestCase):
                     self.assertIs(call.args[0], mock.sentinel.data)
                     self.assertIs(call.kwargs['runner_cls'], compare.RUNNERS[algorithm])
                     self.assertEqual(call.kwargs['algorithm_name'], algorithm)
+                    self.assertEqual(call.args[2]['algo']['gamma'], .995)
                     self.assertIsNone(call.args[3].episode_log)
                     self.assertTrue(call.args[3].no_plot)
+
+    def test_cli_gamma_override_reaches_both_algorithm_hooks(self):
+        with mock.patch.object(cli, 'CascadeData', return_value=mock.sentinel.data), \
+                mock.patch.object(compare, 'run_parallel_experiment',
+                    side_effect=lambda *args, **kwargs: {'algorithm': kwargs['algorithm_name']}) as helper, \
+                mock.patch.object(compare, 'validate_comparison', side_effect=lambda value: value), \
+                redirect_stdout(io.StringIO()):
+            compare.main(['--gamma', '.75', '--no-plot', '--skip-final-evaluation'])
+        self.assertEqual([call.kwargs['algorithm_name'] for call in helper.call_args_list],
+                         ['happo', 'mappo'])
+        for call in helper.call_args_list:
+            self.assertEqual(call.args[2]['algo']['gamma'], .75)
 
     def test_cli_enables_xld_diagnostics_for_both_algorithms_without_run_files(self):
         original_directory = Path.cwd()
@@ -204,6 +217,7 @@ class ComparisonDispatchTest(unittest.TestCase):
         self.assertIs(result, mock.sentinel.result)
         helper.assert_called_once()
         self.assertFalse(hasattr(helper.call_args.args[3], 'algorithms'))
+        self.assertEqual(helper.call_args.args[2]['algo']['gamma'], .995)
 
 
 class ShortComparisonIntegrationTest(unittest.TestCase):
@@ -273,6 +287,8 @@ class ShortComparisonIntegrationTest(unittest.TestCase):
         self.assertEqual(settings['episode_horizon_days'], 4)
         self.assertEqual(settings['parallel_environments'], 2)
         self.assertEqual(settings['episodes_per_seed'], 2)
+        self.assertEqual(settings['gamma'], .995)
+        self.assertEqual(settings['actor_temporal_weighting'], 'uniform_rollout_rows')
         self.assertEqual(settings['periodic_windows'], self.windows)
         for key in ('device', 'train', 'model', 'algo'):
             expected = copy.deepcopy(config[key])
@@ -293,6 +309,7 @@ class ShortComparisonIntegrationTest(unittest.TestCase):
                     self.assertEqual(history[0]['completed_episodes'], 2)
                     self.assertNotIn('xld_dispatch_diagnostics', history[0])
                     self.assertEqual([row['evaluation_round'] for row in evaluations], [0, 1])
+                    self.assertTrue(all(row['gamma'] == .995 for row in evaluations))
                     self.assertTrue(all(row['status'] == 'ok' for row in evaluations))
                     self.assertTrue(all(row['seed'] == seed for row in evaluations))
                     self.assertTrue(all('xld_dispatch_diagnostics' not in window

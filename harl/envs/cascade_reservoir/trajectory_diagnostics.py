@@ -123,6 +123,8 @@ class TrajectoryDiagnosticsWriter:
     The sampled probability belongs to the frozen collection distribution.
     Effective probabilities on forced rows are synthetic ``exp(0)=1`` buffer
     placeholders, not policy likelihoods. Their objective weight is zero.
+    The retained episode_time_weight column is always 1.0: actor rows have no
+    outer discount multiplier. Policy active masks and HAPPO factors are separate.
     """
 
     def __init__(self, path):
@@ -261,7 +263,9 @@ class TrajectoryDiagnosticsWriter:
                               (np.nanstd(normalization_rows)+1e-5))
             else:
                 normalized = advantage.copy()
-            time = _array(buffer.discount_weights(gamma), (days, lanes, 1), 'time weights')
+            # Keep the existing CSV column, with uniform temporal weight for
+            # every row. Gamma is used below only in the frozen TD residual.
+            time = np.ones((days, lanes, 1), dtype=np.float32)
             if not actor.use_policy_active_masks:
                 raise ValueError('Forced trajectory commands require policy active masks')
             weights = time*active
@@ -355,6 +359,10 @@ class TrajectoryDiagnosticsWriter:
         summary = dict(schema='cascade_trajectory_v1', file=str(self.path.resolve()), rows=count,
             total_rows_written=self.rows_written, episode_horizon_days=len(self._transitions),
             parallel_environments=len(batch['episode_ids']), gamma=gamma,
+            actor_temporal_weighting='uniform_rollout_rows',
+            actor_objective_reduction='mean over all rollout rows; policy active masks zero forced rows',
+            episode_time_weight='always 1.0; column retained for CSV compatibility',
+            policy_objective_weight='policy active mask only; HAPPO likelihood factor is recorded separately',
             value_source='before_update snapshot in reward units before optimization and ValueNorm changes',
             probability_source='before_update collection distribution; forced effective probability/log-probability are 1/0 placeholders',
             repeated_accounting_scalars=['global_reward', 'system_reward', 'legacy_team_reward', 'legacy_generation_reward'],

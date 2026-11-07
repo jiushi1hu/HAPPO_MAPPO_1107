@@ -53,6 +53,9 @@ def context_from_configuration(metadata):
         periodic_windows=metadata['periodic_evaluation']['windows'],
         evaluation_interval=experiment.get('eval_interval', 1),
     )
+    architecture = metadata.get('learning_reward_architecture', {})
+    if 'actor_temporal_weighting' in architecture:
+        shared['actor_temporal_weighting'] = architecture['actor_temporal_weighting']
     for key in ('device', 'train', 'model', 'algo'):
         if key in config:
             shared[key] = config[key]

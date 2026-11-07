@@ -58,9 +58,8 @@ def fixture(days=16, gamma=.9, shared=True):
         actions[active[:-1] == 0.] = 0.
         logs = np.full((days, lanes, 1), np.log(.4), np.float32)
         logs[active[:-1] == 0.] = 0.
-        time = np.asarray(gamma**np.arange(days), np.float32)[:, None, None]*np.ones((1, lanes, 1), np.float32)
         buffers.append(SimpleNamespace(active_masks=active, masks=masks.copy(), actions=actions,
-            action_log_probs=logs, discount_weights=lambda value, time=time: time.copy()))
+            action_log_probs=logs))
         factors[i] = np.full((days, lanes, 1), 1.+i/10, np.float32)
     runner = SimpleNamespace(actor_buffer=buffers, actor=actors,
         critic_buffer=SimpleNamespace(rewards=rewards, masks=masks,
@@ -154,6 +153,9 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
             self.assertAlmostEqual(float(row['td_residual']), expected_td, places=5)
             self.assertEqual(float(row['realized_reward_to_go']), float(before['mc'][t,lane,i]))
             self.assertAlmostEqual(float(row['happo_factor']), 1.+i/10, places=6)
+            self.assertEqual(float(row['episode_time_weight']), 1.)
+            self.assertEqual(float(row['policy_objective_weight']),
+                             float(runner.actor_buffer[i].active_masks[t,lane,0]))
             raw = before['gae_targets'][...,i]-before['prediction'][...,i]
             expected_adv = (raw[t,lane]-raw.mean())/(raw.std()+1e-5)
             self.assertAlmostEqual(float(row['normalized_advantage']), expected_adv, places=6)
@@ -163,6 +165,8 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
         self.assertEqual(summary['windows']['october_may']['WDD']['rows'], 23)
         self.assertEqual(summary['windows']['all_days']['THR']['forced_rows'], 32)
         self.assertEqual(summary['windows']['all_days']['THR']['policy_objective_weight_sum'], 0.)
+        self.assertEqual(summary['windows']['all_days']['WDD']['policy_objective_weight_sum'], 31.)
+        self.assertEqual(summary['windows']['all_days']['BHT']['policy_objective_weight_sum'], 32.)
         self.assertEqual(summary['windows']['all_days']['BHT']['spill_days'], 16)
         json.dumps(summary, allow_nan=False)
 
@@ -186,9 +190,14 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
             t, lane = int(row['episode_step'])-1, int(row['parallel_env_index'])
             self.assertEqual(row['guaranteed_output_shortfall_MW'], '')
             self.assertEqual(float(row['legacy_generation_reward']), 10.)
-            self.assertEqual(float(row['episode_time_weight']), float(t == 0))
-            if t > 0 or row['forced_action'] == '1':
-                self.assertEqual(float(row['policy_objective_weight']), 0.)
+            self.assertEqual(float(row['episode_time_weight']), 1.)
+            self.assertEqual(float(row['policy_objective_weight']),
+                             0. if row['forced_action'] == '1' else 1.)
+            i = IDS.index(row['reservoir_id'])
+            self.assertEqual(float(row['td_residual']),
+                             float(runner.critic_buffer.rewards[t,lane,i]-before['prediction'][t,lane,i]))
+            self.assertEqual(float(row['realized_reward_to_go']),
+                             float(runner.critic_buffer.rewards[t,lane,i]))
             if row['reservoir_id'] == 'WDD':
                 expected = (raw[t,lane]-selected.mean())/(selected.std()+1e-5)
                 np.testing.assert_allclose(float(row['normalized_advantage']), expected, rtol=1e-6)

@@ -110,9 +110,9 @@ class SharedMAPPOAgent:
         from harl.algorithms.actors.mappo import MAPPO
         return MAPPO.rollout_distribution(self, actor_buffer)
 
-    def surrogate_metrics(self, actor_buffer, advantages, objective_weights):
+    def surrogate_metrics(self, actor_buffer, advantages):
         from harl.algorithms.actors.mappo import MAPPO
-        return MAPPO.surrogate_metrics(self, actor_buffer, advantages, objective_weights)
+        return MAPPO.surrogate_metrics(self, actor_buffer, advantages)
 
 
 def make_shared_mappo_agents(args, obs_spaces, act_spaces, device=torch.device('cpu')):

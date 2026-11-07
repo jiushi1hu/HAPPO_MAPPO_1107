@@ -77,7 +77,7 @@ class OnPolicyBase:
                                     (if None, all actions available)
             active_masks: (np.ndarray / torch.Tensor) denotes whether an agent is active or dead.
             return_entropy_per_sample: return an unreduced entropy vector so
-                the caller can apply episode-start weights and active masks.
+                the caller can apply active masks before the full-row mean.
         """
 
         (

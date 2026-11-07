@@ -188,6 +188,7 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
     comparison_context=json.loads(json.dumps(dict(shared_settings=dict(
         episode_horizon_days=days,parallel_environments=count,episodes_per_seed=episodes,
         gamma=config['algo']['gamma'],action_bins=bins,seeds=config['experiment']['seeds'],
+        actor_temporal_weighting='uniform_rollout_rows',
         evaluation_interval=eval_interval,
         training_years=list(data.training_years),evaluation_source_years=evaluation_years,
         window_sampling=sampling_mode,physical_config=physical,periodic_windows=periodic_windows,
@@ -202,6 +203,10 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             system_reward='0.5 * sum(local rewards) + 0.5 * global generation reward',
             critic='one centralized network: five mixed-return outputs plus one legacy-team diagnostic output',
             actor_advantages='own mixed-return GAE and own value output; normalize each channel independently',
+            actor_temporal_weighting='uniform_rollout_rows',
+            actor_objective_reduction='mean over all rollout rows; policy active masks zero forced rows',
+            actor_discount_scope='gamma remains in GAE, Monte Carlo returns and reward accounting; '
+                'no additional gamma**t multiplier on policy or entropy objectives',
             legacy_metrics='existing reward, CSV metrics and plot curves retain their team-reward definitions',
             update_interpretation='individual-objective sequential clipped surrogates with original likelihood factors; '
                 'the common-return HAPPO improvement guarantee is not asserted for system accounting'),
@@ -231,6 +236,9 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             columns=list(TRAJECTORY_DIAGNOSTIC_FIELDS),
             values='frozen before optimization and before ValueNorm statistics change',
             advantages='own mixed reward channel; exact configured normalization and actor-entry HAPPO factor',
+            actor_temporal_weighting='uniform_rollout_rows',
+            episode_time_weight='always 1.0; column retained for CSV compatibility',
+            policy_objective_weight='policy active mask only; HAPPO likelihood factor is recorded separately',
             monte_carlo='realized sampled reward-to-go, not true expected values or true advantages',
             summary_windows=['all_days','first_14_days','october_may'],
             updates='observational only; no reward, action, optimizer or normalization changes'),

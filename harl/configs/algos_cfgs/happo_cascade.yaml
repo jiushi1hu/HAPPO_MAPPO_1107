@@ -24,7 +24,7 @@ model:
   action_distribution: categorical
   action_bins: 100
 algo:
-  gamma: 1.0  # Equal weight for all 1,825 scheduling days; also used by GAE and return accounting.
+  gamma: 0.995  # Discount for GAE, critic returns and return accounting; actor rows have no extra time weight.
   gae_lambda: 0.95
   share_param: false
   fixed_order: false
